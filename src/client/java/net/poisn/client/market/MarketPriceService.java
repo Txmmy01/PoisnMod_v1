@@ -22,11 +22,12 @@ public final class MarketPriceService {
     private static volatile String lastUpdateDay = "";
     private MarketPriceService() {}
     public static void start() {
-        refresh();
         long seconds = Math.max(15, PoisnConfig.data.marketRefreshSeconds);
+        // Never perform blocking network I/O on Minecraft's client initialization thread.
+        EXECUTOR.execute(MarketPriceService::refresh);
         EXECUTOR.scheduleAtFixedRate(MarketPriceService::refresh, seconds, seconds, TimeUnit.SECONDS);
     }
-    public static Prices get(String itemId) { return CACHE.get(itemId.toLowerCase()); }
+    public static Prices get(String itemId) { return itemId == null ? null : CACHE.get(itemId.toLowerCase()); }
     public static String getLastUpdateDay() { return lastUpdateDay; }
     private static void refresh() {
         try {
