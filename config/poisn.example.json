@@ -1,0 +1,13 @@
+{
+  "marketApi": "https://269153435.de/api/mod/market/prices",
+  "marketRefreshSeconds": 60,
+  "players": {
+    "ExamplePlayer": {
+      "clan": "[POISN]",
+      "aboveName": "Leader",
+      "aboveColor": "#FFAA00",
+      "belowName": "Online",
+      "belowColor": "&a"
+    }
+  }
+}
