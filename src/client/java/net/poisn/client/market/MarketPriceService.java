@@ -1,56 +1,127 @@
 package net.poisn.client.market;
+
+import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.poisn.client.config.PoisnConfig;
+
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+
 public final class MarketPriceService {
-    private static final HttpClient HTTP = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(8)).build();
-    private static final ScheduledExecutorService EXECUTOR = Executors.newSingleThreadScheduledExecutor(r -> {
-        Thread t = new Thread(r, "POISN-Market-Refresh"); t.setDaemon(true); return t;
-    });
-    private static final Map<String, Prices> CACHE = new ConcurrentHashMap<>();
+    private static final HttpClient HTTP = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(8))
+            .build();
+    private static final ScheduledExecutorService EXECUTOR =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread thread = new Thread(r, "POISN-Market-Refresh");
+                thread.setDaemon(true);
+                return thread;
+            });
+
+    private static volatile Map<String, Prices> cache = Map.of();
     private static volatile String lastUpdateDay = "";
-    private MarketPriceService() {}
-    public static void start() {
-        refresh();
-        long seconds = Math.max(15, PoisnConfig.data.marketRefreshSeconds);
-        EXECUTOR.scheduleAtFixedRate(MarketPriceService::refresh, seconds, seconds, TimeUnit.SECONDS);
+    private static boolean started;
+
+    private MarketPriceService() {
     }
-    public static Prices get(String itemId) { return CACHE.get(itemId.toLowerCase()); }
-    public static String getLastUpdateDay() { return lastUpdateDay; }
+
+    public static synchronized void start() {
+        if (started) {
+            return;
+        }
+        started = true;
+        long seconds = Math.max(15, PoisnConfig.data.marketRefreshSeconds);
+        // Run immediately, but never block the Minecraft client thread.
+        EXECUTOR.scheduleAtFixedRate(
+                MarketPriceService::refresh, 0, seconds, TimeUnit.SECONDS);
+    }
+
+    public static Prices get(String itemId) {
+        if (itemId == null) {
+            return null;
+        }
+        return cache.get(itemId.toLowerCase(Locale.ROOT));
+    }
+
+    public static String getLastUpdateDay() {
+        return lastUpdateDay;
+    }
+
     private static void refresh() {
         try {
-            HttpRequest request = HttpRequest.newBuilder(URI.create(PoisnConfig.data.marketApi))
-                .timeout(Duration.ofSeconds(12)).header("Accept", "application/json").GET().build();
-            HttpResponse<String> response = HTTP.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200) return;
-            JsonObject root = JsonParser.parseString(response.body()).getAsJsonObject();
-            if (!root.has("ok") || !root.get("ok").getAsBoolean() || !root.has("items")) return;
+            URI uri = URI.create(PoisnConfig.data.marketApi);
+            HttpRequest request = HttpRequest.newBuilder(uri)
+                    .timeout(Duration.ofSeconds(12))
+                    .header("Accept", "application/json")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response =
+                    HTTP.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                return;
+            }
+
+            JsonElement parsed = JsonParser.parseString(response.body());
+            if (!parsed.isJsonObject()) {
+                return;
+            }
+            JsonObject root = parsed.getAsJsonObject();
+            if (!root.has("ok") || !root.get("ok").isJsonPrimitive()
+                    || !root.get("ok").getAsBoolean()
+                    || !root.has("items") || !root.get("items").isJsonObject()) {
+                return;
+            }
+
             JsonObject items = root.getAsJsonObject("items");
-            Map<String, Prices> fresh = new ConcurrentHashMap<>();
+            Map<String, Prices> fresh = new HashMap<>();
             for (Map.Entry<String, JsonElement> entry : items.entrySet()) {
-                if (!entry.getValue().isJsonArray() || entry.getValue().getAsJsonArray().size() < 2) continue;
-                var values = entry.getValue().getAsJsonArray();
-                if (values.get(0).isJsonNull() || values.get(1).isJsonNull()) continue;
-                fresh.put(entry.getKey().toLowerCase(), new Prices(values.get(0).getAsDouble(), values.get(1).getAsDouble()));
+                JsonElement element = entry.getValue();
+                if (!element.isJsonArray()) {
+                    continue;
+                }
+                JsonArray values = element.getAsJsonArray();
+                if (values.size() < 2
+                        || !values.get(0).isJsonPrimitive()
+                        || !values.get(1).isJsonPrimitive()
+                        || !values.get(0).getAsJsonPrimitive().isNumber()
+                        || !values.get(1).getAsJsonPrimitive().isNumber()) {
+                    continue;
+                }
+
+                double ahPrice = values.get(0).getAsDouble();
+                double orderPrice = values.get(1).getAsDouble();
+                if (!Double.isFinite(ahPrice) || !Double.isFinite(orderPrice)
+                        || ahPrice < 0 || orderPrice < 0) {
+                    continue;
+                }
+                fresh.put(entry.getKey().toLowerCase(Locale.ROOT),
+                        new Prices(ahPrice, orderPrice));
             }
+
+            // Keep the previous successful snapshot if the response is empty/invalid.
             if (!fresh.isEmpty()) {
-                CACHE.putAll(fresh);
-                lastUpdateDay = root.has("day") ? root.get("day").getAsString() : "";
+                cache = Map.copyOf(fresh);
+                lastUpdateDay = root.has("day") && root.get("day").isJsonPrimitive()
+                        ? root.get("day").getAsString() : "";
             }
-        } catch (Exception e) {
-            System.err.println("[POISN] Market refresh failed; keeping last successful prices: " + e.getMessage());
+        } catch (Exception exception) {
+            System.err.println("[POISN] Market refresh failed; keeping last successful prices: "
+                    + exception.getMessage());
         }
     }
-    public record Prices(double ahPrice, double orderPrice) {}
+
+    public record Prices(double ahPrice, double orderPrice) {
+    }
 }
